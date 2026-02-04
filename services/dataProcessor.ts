@@ -25,6 +25,67 @@ const isLocationLike = (obj: any): boolean => {
     return keys.some(k => k in obj);
 };
 
+// Format Google Places type strings to human-readable format
+const formatPlaceType = (type: string): string => {
+    // Handle common type mappings
+    const typeMap: Record<string, string> = {
+        'restaurant': 'Restaurant',
+        'cafe': 'Cafe',
+        'bar': 'Bar',
+        'grocery_or_supermarket': 'Grocery Store',
+        'supermarket': 'Supermarket',
+        'shopping_mall': 'Shopping Mall',
+        'store': 'Store',
+        'gas_station': 'Gas Station',
+        'gym': 'Gym',
+        'park': 'Park',
+        'hospital': 'Hospital',
+        'pharmacy': 'Pharmacy',
+        'bank': 'Bank',
+        'atm': 'ATM',
+        'lodging': 'Hotel/Lodging',
+        'airport': 'Airport',
+        'train_station': 'Train Station',
+        'bus_station': 'Bus Station',
+        'subway_station': 'Subway Station',
+        'parking': 'Parking',
+        'car_wash': 'Car Wash',
+        'car_repair': 'Auto Repair',
+        'movie_theater': 'Movie Theater',
+        'museum': 'Museum',
+        'library': 'Library',
+        'school': 'School',
+        'university': 'University',
+        'church': 'Church',
+        'doctor': 'Doctor',
+        'dentist': 'Dentist',
+        'beauty_salon': 'Beauty Salon',
+        'hair_care': 'Hair Salon',
+        'spa': 'Spa',
+        'laundry': 'Laundry',
+        'home_goods_store': 'Home Goods',
+        'hardware_store': 'Hardware Store',
+        'electronics_store': 'Electronics',
+        'clothing_store': 'Clothing Store',
+        'furniture_store': 'Furniture Store',
+        'pet_store': 'Pet Store',
+        'food': 'Food',
+        'meal_delivery': 'Meal Delivery',
+        'meal_takeaway': 'Takeaway',
+        'bakery': 'Bakery',
+        'convenience_store': 'Convenience Store',
+        'liquor_store': 'Liquor Store',
+    };
+    
+    if (typeMap[type]) return typeMap[type];
+    
+    // Fallback: convert snake_case to Title Case
+    return type
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+};
+
 const findDataArray = (data: any): any[] | null => {
     if (!data) return null;
     if (Array.isArray(data)) return data;
@@ -68,6 +129,7 @@ export const calculateStats = (events: ProcessedEvent[]): DashboardStats => {
             uniquePlaces: 0,
             topCities: [],
             activityBreakdown: [],
+            typeBreakdown: [],
             dateRange: { start: new Date(), end: new Date() },
             placeVisitCounts: {}
         };
@@ -77,7 +139,16 @@ export const calculateStats = (events: ProcessedEvent[]): DashboardStats => {
     const placeCounts = new Map<string, number>(); // City counts
     const visitCountsByName = new Map<string, number>(); // Specific Place Name counts
     const activityCounts = new Map<string, number>();
+    const typeCounts = new Map<string, number>(); // Place type counts
     const uniquePlaceTitles = new Set<string>();
+    
+    // Home/Work tracking
+    let homeHoursMs = 0;
+    let homeVisits = 0;
+    let homeAddress = '';
+    let workHoursMs = 0;
+    let workVisits = 0;
+    let workAddress = '';
     
     let minDate = new Date(8640000000000000);
     let maxDate = new Date(-8640000000000000);
@@ -94,14 +165,43 @@ export const calculateStats = (events: ProcessedEvent[]): DashboardStats => {
 
         // Visits & Places
         if (e.type === 'VISIT') {
-            uniquePlaceTitles.add(e.title);
+            const isHome = e.semanticType === 'HOME';
+            const isWork = e.semanticType === 'WORK';
+            const durationMs = e.endTime.getTime() - e.startTime.getTime();
             
-            // Track visit frequency by name
-            visitCountsByName.set(e.title, (visitCountsByName.get(e.title) || 0) + 1);
+            // Track Home stats
+            if (isHome) {
+                homeHoursMs += durationMs;
+                homeVisits++;
+                if (!homeAddress && e.subtitle) {
+                    homeAddress = e.title || e.subtitle;
+                }
+            }
+            // Track Work stats
+            else if (isWork) {
+                workHoursMs += durationMs;
+                workVisits++;
+                if (!workAddress && e.subtitle) {
+                    workAddress = e.title || e.subtitle;
+                }
+            }
+            // Only include non-Home/Work in charts
+            else {
+                uniquePlaceTitles.add(e.title);
+                
+                // Track visit frequency by name (exclude Home/Work)
+                visitCountsByName.set(e.title, (visitCountsByName.get(e.title) || 0) + 1);
 
-            // Track city frequency
-            if (e.city) {
-                placeCounts.set(e.city, (placeCounts.get(e.city) || 0) + 1);
+                // Track city frequency (exclude Home/Work)
+                if (e.city) {
+                    placeCounts.set(e.city, (placeCounts.get(e.city) || 0) + 1);
+                }
+                
+                // Track place type frequency (exclude Home/Work)
+                if (e.placeTypes && e.placeTypes.length > 0) {
+                    const primaryType = e.placeTypes[0];
+                    typeCounts.set(primaryType, (typeCounts.get(primaryType) || 0) + 1);
+                }
             }
         }
 
@@ -125,8 +225,21 @@ export const calculateStats = (events: ProcessedEvent[]): DashboardStats => {
     if (activityBreakdown.length === 0 && events.length > 0) {
         activityBreakdown.push({ name: 'Recorded Points', value: events.length });
     }
+    
+    // Type breakdown - top 10 place types, formatted nicely
+    const typeBreakdown = Array.from(typeCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([name, count]) => ({ 
+            name: formatPlaceType(name), 
+            count 
+        }));
 
     const placeVisitCounts = Object.fromEntries(visitCountsByName);
+    
+    // Convert ms to hours
+    const homeHours = Math.round(homeHoursMs / (1000 * 60 * 60));
+    const workHours = Math.round(workHoursMs / (1000 * 60 * 60));
 
     return {
         totalDistanceKm: Math.round(totalDistanceMeters / 1000),
@@ -134,8 +247,11 @@ export const calculateStats = (events: ProcessedEvent[]): DashboardStats => {
         uniquePlaces: uniquePlaceTitles.size,
         topCities,
         activityBreakdown,
+        typeBreakdown,
         dateRange: { start: minDate, end: maxDate },
-        placeVisitCounts
+        placeVisitCounts,
+        homeStats: homeVisits > 0 ? { address: homeAddress, hours: homeHours, visits: homeVisits } : undefined,
+        workStats: workVisits > 0 ? { address: workAddress, hours: workHours, visits: workVisits } : undefined
     };
 };
 
@@ -189,6 +305,7 @@ export const parseTimelineData = (jsonData: any): { events: ProcessedEvent[]; st
                 const name = topCandidate?.name || 'Visited Place';
                 const city = extractCity(topCandidate?.placeLocation?.address); 
                 const placeId = topCandidate?.placeId;
+                const semanticType = topCandidate?.semanticType || 'UNKNOWN';
 
                 events.push({
                     id: `v-${index}`,
@@ -201,6 +318,7 @@ export const parseTimelineData = (jsonData: any): { events: ProcessedEvent[]; st
                     lng: coords[1],
                     city: city,
                     placeId: placeId,
+                    semanticType: semanticType,
                     raw: obj
                 });
             }
@@ -289,6 +407,7 @@ export const parseTimelineData = (jsonData: any): { events: ProcessedEvent[]; st
                   const end = new Date(placeVisit.duration?.endTimestamp || startStr);
                   const city = extractCity(loc.address);
                   const placeId = loc.placeId;
+                  const semanticType = loc.semanticType || placeVisit.placeVisitType || 'UNKNOWN';
 
                   events.push({
                       id: `legacy-v-${index}`,
@@ -300,6 +419,7 @@ export const parseTimelineData = (jsonData: any): { events: ProcessedEvent[]; st
                       lat, lng, 
                       city: city,
                       placeId: placeId,
+                      semanticType: semanticType,
                       raw: obj
                   });
               }

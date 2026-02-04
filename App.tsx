@@ -162,7 +162,8 @@ export default function App() {
                 ...event,
                 title: enrichment.name,
                 subtitle: enrichment.address || event.subtitle,
-                city: enrichment.city || event.city
+                city: enrichment.city || event.city,
+                placeTypes: enrichment.types || event.placeTypes
               };
               enrichedCount++;
             }
@@ -271,13 +272,26 @@ export default function App() {
         for (const placeId of uniqueIds) {
             try {
                 const place = new Place({ id: placeId });
-                await place.fetchFields({ fields: ['displayName', 'formattedAddress'] });
+                await place.fetchFields({ 
+                  fields: [
+                    'displayName', 
+                    'formattedAddress',
+                    'rating',
+                    'userRatingCount',
+                    'types',
+                    'regularOpeningHours',
+                    'nationalPhoneNumber',
+                    'websiteURI',
+                    'priceLevel'
+                  ] 
+                });
                 
                 const realName = place.displayName;
                 const address = place.formattedAddress;
                 
                 if (realName) {
                     const city = extractCity(address);
+                    const types = place.types || undefined;
                     
                     // Update all events with this placeId
                     for (let i = 0; i < newEvents.length; i++) {
@@ -286,19 +300,27 @@ export default function App() {
                                 ...newEvents[i],
                                 title: realName,
                                 subtitle: address || newEvents[i].subtitle,
-                                city: city || newEvents[i].city
+                                city: city || newEvents[i].city,
+                                placeTypes: types
                             };
                             hasUpdates = true;
                         }
                     }
                     
-                    // Queue for IndexedDB persistence
+                    // Queue for IndexedDB persistence with extended fields
                     batchEnrichments.push({
                       placeId,
                       name: realName,
                       address: address || undefined,
                       city: city || undefined,
-                      enrichedAt: Date.now()
+                      enrichedAt: Date.now(),
+                      rating: place.rating || undefined,
+                      userRatingCount: place.userRatingCount || undefined,
+                      types: place.types || undefined,
+                      openingHours: place.regularOpeningHours?.weekdayDescriptions || undefined,
+                      phoneNumber: place.nationalPhoneNumber || undefined,
+                      websiteUri: place.websiteURI || undefined,
+                      priceLevel: place.priceLevel || undefined
                     });
                 }
             } catch (err: any) {
@@ -832,9 +854,6 @@ export default function App() {
          {activeTab === 'dashboard' ? (
              <div className="flex flex-col gap-6 h-full animate-fade-in">
                  <StatsView stats={filteredStats} />
-                 <div className="flex-1 min-h-[500px] border border-slate-700 rounded-xl overflow-hidden relative shadow-2xl bg-slate-900">
-                    <MapView events={filteredEvents} googleMapsApiKey={googleMapsApiKey} />
-                 </div>
              </div>
          ) : (
              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-140px)] animate-fade-in">

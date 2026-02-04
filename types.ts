@@ -80,6 +80,9 @@ export interface ProcessedEvent {
   activityType?: string;
   // Google Maps specific
   placeId?: string;
+  placeTypes?: string[];
+  // Semantic type (HOME, WORK, UNKNOWN, etc.)
+  semanticType?: string;
 }
 
 export interface DashboardStats {
@@ -88,7 +91,11 @@ export interface DashboardStats {
   uniquePlaces: number;
   topCities: { name: string; count: number }[];
   activityBreakdown: { name: string; value: number }[];
+  typeBreakdown: { name: string; count: number }[];
   dateRange: { start: Date; end: Date };
   // New field for AI context
   placeVisitCounts: Record<string, number>;
+  // Home/Work stats
+  homeStats?: { address: string; hours: number; visits: number };
+  workStats?: { address: string; hours: number; visits: number };
 }

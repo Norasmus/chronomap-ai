@@ -11,6 +11,14 @@ export interface EnrichedPlace {
   address?: string;
   city?: string;
   enrichedAt: number;
+  // Extended fields
+  rating?: number;
+  userRatingCount?: number;
+  types?: string[];
+  openingHours?: string[];
+  phoneNumber?: string;
+  websiteUri?: string;
+  priceLevel?: string;
 }
 
 let dbInstance: IDBDatabase | null = null;
