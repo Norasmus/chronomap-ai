@@ -7,6 +7,7 @@ import { DashboardStats, ProcessedEvent } from '../types';
 interface ChatInterfaceProps {
     stats: DashboardStats;
     events: ProcessedEvent[];
+    allEvents: ProcessedEvent[];  // Full dataset for historical queries
     onDateChange: (start: string, end: string) => void;
     onPlaceFilter: (query: string, allTime: boolean) => void;
 }
@@ -20,9 +21,9 @@ interface Message {
     actionIcon?: React.ElementType;
 }
 
-const ChatInterface: React.FC<ChatInterfaceProps> = ({ stats, events, onDateChange, onPlaceFilter }) => {
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ stats, events, allEvents, onDateChange, onPlaceFilter }) => {
     const [messages, setMessages] = useState<Message[]>([
-        { id: 'init', role: 'assistant', content: "Hello! I've analyzed your timeline. Ask me about your travel history, top places, or ask me to 'Show last week's data' to filter the view." }
+        { id: 'init', role: 'assistant', content: "Hello! I've analyzed your complete timeline history. Ask me about your travel patterns, visit counts, or ask me to filter the view to a specific date range." }
     ]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -34,10 +35,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ stats, events, onDateChan
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const eventsRef = useRef(events);
+    const allEventsRef = useRef(allEvents);
 
     useEffect(() => {
         eventsRef.current = events;
     }, [events]);
+    
+    useEffect(() => {
+        allEventsRef.current = allEvents;
+    }, [allEvents]);
 
     useEffect(() => {
         if (scrollRef.current) {
@@ -83,7 +89,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ stats, events, onDateChan
         setIsLoading(true);
 
         try {
-            const response = await chatWithTimeline(userMsg, stats, events);
+            // Use ALL events for queries so historical questions can be answered
+            const response = await chatWithTimeline(userMsg, stats, allEvents);
             
             let hasToolCall = false;
 

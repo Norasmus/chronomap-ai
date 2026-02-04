@@ -5,7 +5,17 @@ import StatsView from './components/StatsView';
 import ChatInterface from './components/ChatInterface';
 import { parseTimelineData, calculateStats, extractCity } from './services/dataProcessor';
 import { ProcessedEvent, DashboardStats } from './types';
-import { Map as MapIcon, BarChart2, MessageSquare, Loader2, Calendar, X, Settings, Key, RefreshCw, Search, CheckCircle2 } from 'lucide-react';
+import { 
+  initDB, 
+  getEnrichmentMap, 
+  saveEnrichedPlaces, 
+  exportEnrichments, 
+  importEnrichments,
+  getEnrichedCount,
+  EnrichedPlace 
+} from './services/enrichmentStore';
+import { setGeminiApiKey } from './services/geminiService';
+import { Map as MapIcon, BarChart2, MessageSquare, Loader2, Calendar, X, Settings, Key, RefreshCw, Search, CheckCircle2, Download, Upload, Database } from 'lucide-react';
 
 export default function App() {
   const [data, setData] = useState<{ events: ProcessedEvent[]; stats: DashboardStats } | null>(null);
@@ -23,17 +33,44 @@ export default function App() {
   const [searchInputValue, setSearchInputValue] = useState('');
   const [suggestions, setSuggestions] = useState<any[]>([]);
 
-  // Settings State
+  // Settings State - Pre-filled for testing
   const [showSettings, setShowSettings] = useState(false);
-  const [googleMapsApiKey, setGoogleMapsApiKey] = useState('');
+  const [googleMapsApiKey, setGoogleMapsApiKey] = useState('AIzaSyDkZ7kRvLTDsZ9x3re68BHQklIb0w2K-5g');
+  const [geminiApiKey, setGeminiApiKeyState] = useState('AIzaSyC3SL9eMYBO1KvcORuJGc0AFKmyxN7_uoo');
   const [tempApiKey, setTempApiKey] = useState(''); // Temp state for input to avoid triggering load while typing
   const [mapsLoaded, setMapsLoaded] = useState(false);
+  
+  // Sync Gemini API key with service
+  const handleGeminiApiKeyChange = (key: string) => {
+    setGeminiApiKeyState(key);
+    setGeminiApiKey(key);
+  };
+  
+  // Initialize Gemini API key on mount
+  useEffect(() => {
+    if (geminiApiKey) {
+      setGeminiApiKey(geminiApiKey);
+    }
+  }, []);
+  
+  // Enrichment State
+  const [enrichmentMode, setEnrichmentMode] = useState<'view' | 'all'>('view');
+  const [totalPlacesToEnrich, setTotalPlacesToEnrich] = useState(0);
+  const [enrichedPlacesCount, setEnrichedPlacesCount] = useState(0);
+  const [storedEnrichmentsCount, setStoredEnrichmentsCount] = useState(0);
   
   // Track invalid/expired Place IDs to avoid retrying them
   const failedEnrichmentIds = useRef<Set<string>>(new Set());
   
   // Autocomplete Class Ref (New Places API)
   const autocompleteClassRef = useRef<any>(null);
+  
+  // Initialize IndexedDB on mount
+  useEffect(() => {
+    initDB().then(() => {
+      getEnrichedCount().then(count => setStoredEnrichmentsCount(count));
+    }).catch(console.error);
+  }, []);
 
   // Sync temp key when settings open
   useEffect(() => {
@@ -42,17 +79,38 @@ export default function App() {
     }
   }, [showSettings, googleMapsApiKey]);
 
-  // Load Google Maps Script Global
+  // Load Google Maps Script Global (only once)
   useEffect(() => {
-    if (!googleMapsApiKey || window.google?.maps || mapsLoaded) return;
+    // Skip if no API key, script already exists, or already loaded
+    if (!googleMapsApiKey) return;
+    
+    // Check if script already exists in DOM
+    const existingScript = document.querySelector('script[src*="maps.googleapis.com"]');
+    if (existingScript) {
+      // Script exists, just wait for it to be ready
+      const checkReady = setInterval(() => {
+        if (window.google?.maps?.importLibrary) {
+          setMapsLoaded(true);
+          clearInterval(checkReady);
+        }
+      }, 100);
+      return () => clearInterval(checkReady);
+    }
+    
+    if (mapsLoaded) return;
 
     const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${googleMapsApiKey}&libraries=places,marker&v=beta&loading=async`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${googleMapsApiKey}&libraries=places,marker&v=beta`;
     script.async = true;
+    script.defer = true;
     script.onload = () => {
-      setTimeout(() => {
+      // Wait for importLibrary to be available
+      const checkReady = setInterval(() => {
+        if (window.google?.maps?.importLibrary) {
           setMapsLoaded(true);
-      }, 500);
+          clearInterval(checkReady);
+        }
+      }, 100);
     };
     script.onerror = () => {
         console.error("Failed to load Google Maps script");
@@ -62,12 +120,13 @@ export default function App() {
 
   // Initialize Autocomplete Services (New Places API only)
   useEffect(() => {
-      if (mapsLoaded && window.google?.maps?.places) {
+      if (mapsLoaded && window.google?.maps?.importLibrary) {
           const initService = async () => {
              try {
                 // New AutocompleteSuggestion API
                 const { AutocompleteSuggestion } = await window.google.maps.importLibrary("places");
                 autocompleteClassRef.current = AutocompleteSuggestion;
+                console.log("Autocomplete service initialized successfully");
              } catch (e) {
                  console.error("Failed to init Autocomplete Services", e);
              }
@@ -76,8 +135,8 @@ export default function App() {
       }
   }, [mapsLoaded]);
 
-  // Initial Data Load
-  const handleFileLoaded = (jsonData: any) => {
+  // Initial Data Load - applies stored enrichments automatically
+  const handleFileLoaded = async (jsonData: any) => {
     if (!googleMapsApiKey) {
         alert("Please enter a Google Maps API Key first.");
         return;
@@ -86,51 +145,77 @@ export default function App() {
     setIsProcessing(true);
     failedEnrichmentIds.current.clear();
     
-    setTimeout(() => {
-      try {
-        const result = parseTimelineData(jsonData);
-        if (result) {
-          setData(result);
-          
-          const maxDate = result.stats.dateRange.end;
-          const minDate = result.stats.dateRange.start;
-          
-          const defaultEnd = new Date(maxDate);
-          const defaultStart = new Date(maxDate);
-          defaultStart.setDate(defaultStart.getDate() - 7);
-          
-          const finalStart = defaultStart < minDate ? minDate : defaultStart;
-
-          setStartDate(finalStart.toISOString().split('T')[0]);
-          setEndDate(defaultEnd.toISOString().split('T')[0]);
-          
-          // Trigger auto enrichment
-          setAutoEnrichTrigger(true);
-        } else {
-          alert('Could not find any location history in this file. Please ensure it is a valid Timeline export.');
+    try {
+      const result = parseTimelineData(jsonData);
+      if (result) {
+        // Apply stored enrichments from IndexedDB
+        const enrichmentMap = await getEnrichmentMap();
+        let enrichedCount = 0;
+        
+        if (enrichmentMap.size > 0) {
+          console.log(`Applying ${enrichmentMap.size} stored enrichments...`);
+          for (let i = 0; i < result.events.length; i++) {
+            const event = result.events[i];
+            if (event.placeId && enrichmentMap.has(event.placeId)) {
+              const enrichment = enrichmentMap.get(event.placeId)!;
+              result.events[i] = {
+                ...event,
+                title: enrichment.name,
+                subtitle: enrichment.address || event.subtitle,
+                city: enrichment.city || event.city
+              };
+              enrichedCount++;
+            }
+          }
+          // Recalculate stats with enriched data
+          result.stats = calculateStats(result.events);
+          console.log(`Applied enrichments to ${enrichedCount} events`);
         }
-      } catch (err) {
-        console.error(err);
-        alert('An error occurred while reading the file.');
-      } finally {
-        setIsProcessing(false);
+        
+        setData(result);
+        setStoredEnrichmentsCount(enrichmentMap.size);
+        
+        const maxDate = result.stats.dateRange.end;
+        const minDate = result.stats.dateRange.start;
+        
+        const defaultEnd = new Date(maxDate);
+        const defaultStart = new Date(maxDate);
+        defaultStart.setDate(defaultStart.getDate() - 7);
+        
+        const finalStart = defaultStart < minDate ? minDate : defaultStart;
+
+        setStartDate(finalStart.toISOString().split('T')[0]);
+        setEndDate(defaultEnd.toISOString().split('T')[0]);
+        
+        // Count how many places still need enrichment
+        const unknownPlaces = new Set<string>();
+        result.events.forEach(e => {
+          if (e.type === 'VISIT' && e.placeId && (e.title === 'Visited Place' || e.title === 'Unknown Location')) {
+            unknownPlaces.add(e.placeId);
+          }
+        });
+        setTotalPlacesToEnrich(unknownPlaces.size);
+        
+        // Only auto-enrich if there are places to enrich
+        if (unknownPlaces.size > 0) {
+          setAutoEnrichTrigger(true);
+        }
+      } else {
+        alert('Could not find any location history in this file. Please ensure it is a valid Timeline export.');
       }
-    }, 100);
+    } catch (err) {
+      console.error(err);
+      alert('An error occurred while reading the file.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  // Data Enrichment Logic
-  const enrichData = useCallback(async () => {
+  // Data Enrichment Logic - supports both 'view' (filtered) and 'all' (entire dataset) modes
+  const enrichData = useCallback(async (mode: 'view' | 'all' = 'view') => {
     if (!data || !window.google?.maps || !googleMapsApiKey || isEnriching) return;
 
-    let startFilter = new Date(0); 
-    let endFilter = new Date(8640000000000000); 
-    
-    if (startDate) startFilter = new Date(startDate);
-    if (endDate) {
-        endFilter = new Date(endDate);
-        endFilter.setHours(23, 59, 59, 999);
-    }
-    
+    setEnrichmentMode(mode);
     setIsEnriching(true);
     setEnrichmentProgress(0);
 
@@ -139,8 +224,21 @@ export default function App() {
         
         const unknownPlaces = new Map<string, ProcessedEvent[]>();
         
+        // Determine date filter based on mode
+        let startFilter = new Date(0); 
+        let endFilter = new Date(8640000000000000); 
+        
+        if (mode === 'view') {
+          if (startDate) startFilter = new Date(startDate);
+          if (endDate) {
+              endFilter = new Date(endDate);
+              endFilter.setHours(23, 59, 59, 999);
+          }
+        }
+        // For 'all' mode, no date filtering - process everything
+        
         data.events.forEach(e => {
-            if (e.startTime < startFilter || e.startTime > endFilter) return;
+            if (mode === 'view' && (e.startTime < startFilter || e.startTime > endFilter)) return;
 
             if (e.type === 'VISIT' && e.placeId && (e.title === 'Visited Place' || e.title === 'Unknown Location')) {
                 if (failedEnrichmentIds.current.has(e.placeId)) return;
@@ -151,19 +249,26 @@ export default function App() {
         });
 
         const uniqueIds = Array.from(unknownPlaces.keys());
-        const limitedIds = uniqueIds.slice(0, 50);
+        const totalToProcess = uniqueIds.length;
         
-        if (limitedIds.length === 0) {
-            console.log("No new eligible places to enrich in current view.");
+        // For 'all' mode, process in larger batches; for 'view' mode, limit to 50
+        const batchSize = mode === 'all' ? 100 : 50;
+        
+        if (totalToProcess === 0) {
+            console.log(`No places to enrich in ${mode} mode.`);
             setIsEnriching(false);
             return;
         }
 
+        console.log(`Enriching ${totalToProcess} places in ${mode} mode...`);
+        setTotalPlacesToEnrich(totalToProcess);
+
         let processed = 0;
+        let batchEnrichments: EnrichedPlace[] = [];
         const newEvents = [...data.events];
         let hasUpdates = false;
 
-        for (const placeId of limitedIds) {
+        for (const placeId of uniqueIds) {
             try {
                 const place = new Place({ id: placeId });
                 await place.fetchFields({ fields: ['displayName', 'formattedAddress'] });
@@ -172,17 +277,29 @@ export default function App() {
                 const address = place.formattedAddress;
                 
                 if (realName) {
+                    const city = extractCity(address);
+                    
+                    // Update all events with this placeId
                     for (let i = 0; i < newEvents.length; i++) {
                         if (newEvents[i].placeId === placeId) {
                             newEvents[i] = {
                                 ...newEvents[i],
                                 title: realName,
                                 subtitle: address || newEvents[i].subtitle,
-                                city: extractCity(address) || newEvents[i].city
+                                city: city || newEvents[i].city
                             };
                             hasUpdates = true;
                         }
                     }
+                    
+                    // Queue for IndexedDB persistence
+                    batchEnrichments.push({
+                      placeId,
+                      name: realName,
+                      address: address || undefined,
+                      city: city || undefined,
+                      enrichedAt: Date.now()
+                    });
                 }
             } catch (err: any) {
                  const msg = err?.message || '';
@@ -192,14 +309,44 @@ export default function App() {
                      console.warn(`Failed to enrich place ${placeId}`, err);
                  }
             }
+            
             processed++;
-            setEnrichmentProgress(Math.round((processed / limitedIds.length) * 100));
+            setEnrichedPlacesCount(processed);
+            setEnrichmentProgress(Math.round((processed / totalToProcess) * 100));
+            
+            // Save to IndexedDB in batches of 20
+            if (batchEnrichments.length >= 20) {
+              await saveEnrichedPlaces(batchEnrichments);
+              setStoredEnrichmentsCount(prev => prev + batchEnrichments.length);
+              batchEnrichments = [];
+            }
+            
+            // For 'view' mode, stop after batchSize
+            if (mode === 'view' && processed >= batchSize) {
+              break;
+            }
+            
+            // Small delay to avoid rate limiting (every 10 requests)
+            if (processed % 10 === 0) {
+              await new Promise(r => setTimeout(r, 100));
+            }
+        }
+        
+        // Save remaining enrichments
+        if (batchEnrichments.length > 0) {
+          await saveEnrichedPlaces(batchEnrichments);
+          setStoredEnrichmentsCount(prev => prev + batchEnrichments.length);
         }
 
         if (hasUpdates) {
             const newStats = calculateStats(newEvents);
             setData({ events: newEvents, stats: newStats });
         }
+        
+        // Update remaining count
+        const remaining = totalToProcess - processed;
+        setTotalPlacesToEnrich(remaining);
+        console.log(`Enrichment complete. ${processed} places processed, ${remaining} remaining.`);
 
     } catch (err) {
         console.error("Enrichment error:", err);
@@ -208,13 +355,43 @@ export default function App() {
     }
   }, [data, googleMapsApiKey, isEnriching, startDate, endDate]);
 
-  // Auto-run Enrichment on data load
+  // Auto-run Enrichment on data load (view mode only)
   useEffect(() => {
     if (autoEnrichTrigger && data && mapsLoaded && !isEnriching) {
-        enrichData();
+        enrichData('view');
         setAutoEnrichTrigger(false);
     }
   }, [autoEnrichTrigger, data, mapsLoaded, isEnriching, enrichData]);
+  
+  // Export enrichments to JSON file
+  const handleExportEnrichments = async () => {
+    try {
+      const json = await exportEnrichments();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `chronomap-enrichments-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Export failed:', err);
+      alert('Failed to export enrichments');
+    }
+  };
+  
+  // Import enrichments from JSON file
+  const handleImportEnrichments = async (file: File) => {
+    try {
+      const text = await file.text();
+      const count = await importEnrichments(text);
+      setStoredEnrichmentsCount(prev => prev + count);
+      alert(`Successfully imported ${count} enrichments. Reload data to apply.`);
+    } catch (err) {
+      console.error('Import failed:', err);
+      alert('Failed to import enrichments. Invalid file format.');
+    }
+  };
 
   // Derive filtered data
   const filteredEvents = useMemo(() => {
@@ -236,10 +413,8 @@ export default function App() {
         });
     }
 
-    // 2. Date Filter
-    const shouldIgnoreDates = placeFilter && searchAllTime;
-
-    if (!shouldIgnoreDates) {
+    // 2. Date Filter (skip if All-Time is checked)
+    if (!searchAllTime) {
         if (startDate && endDate) {
             const start = new Date(startDate);
             const end = new Date(endDate);
@@ -332,12 +507,12 @@ export default function App() {
         </div>
         
         <div className="w-full max-w-2xl animate-fade-in-up delay-100 space-y-4">
-            {/* Step 1: API Key */}
+            {/* Step 1: Google Maps API Key */}
             <div className={`p-6 rounded-xl border transition-all ${googleMapsApiKey.length > 5 ? 'bg-slate-800/80 border-indigo-500/50 shadow-lg shadow-indigo-500/10' : 'bg-slate-800/50 border-slate-700'}`}>
                 <div className="flex items-center justify-between mb-4">
                     <label className="block text-sm font-medium text-slate-300 flex items-center gap-2">
                         <Key className="w-4 h-4 text-indigo-400" />
-                        1. Enter Google Maps API Key <span className="text-pink-500">*</span>
+                        1. Google Maps API Key <span className="text-pink-500">*</span>
                     </label>
                     {googleMapsApiKey.length > 5 && (
                         <CheckCircle2 className="w-5 h-5 text-emerald-500 animate-fade-in" />
@@ -351,13 +526,36 @@ export default function App() {
                     className="w-full bg-slate-950 border border-slate-600 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all placeholder:text-slate-600"
                 />
                 <p className="text-xs text-slate-500 mt-2">
-                    A valid API Key with "Maps Javascript API" and "Places API" enabled is required.
+                    Required for maps and place enrichment. Enable "Maps Javascript API" and "Places API".
                 </p>
             </div>
 
-            {/* Step 2: File Upload */}
+            {/* Step 2: Gemini API Key (Optional) */}
+            <div className={`p-6 rounded-xl border transition-all ${geminiApiKey.length > 5 ? 'bg-slate-800/80 border-purple-500/50 shadow-lg shadow-purple-500/10' : 'bg-slate-800/50 border-slate-700'}`}>
+                <div className="flex items-center justify-between mb-4">
+                    <label className="block text-sm font-medium text-slate-300 flex items-center gap-2">
+                        <MessageSquare className="w-4 h-4 text-purple-400" />
+                        2. Gemini AI API Key <span className="text-slate-500">(for Chat)</span>
+                    </label>
+                    {geminiApiKey.length > 5 && (
+                        <CheckCircle2 className="w-5 h-5 text-emerald-500 animate-fade-in" />
+                    )}
+                </div>
+                <input 
+                    type="password" 
+                    value={geminiApiKey}
+                    onChange={(e) => handleGeminiApiKeyChange(e.target.value)}
+                    placeholder="Paste your Gemini API key here (AIza...)"
+                    className="w-full bg-slate-950 border border-slate-600 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-purple-500 outline-none transition-all placeholder:text-slate-600"
+                />
+                <p className="text-xs text-slate-500 mt-2">
+                    Optional. Get from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">Google AI Studio</a>. Required for AI chat features.
+                </p>
+            </div>
+
+            {/* Step 3: File Upload */}
             <div className={`transition-all duration-500 ${!googleMapsApiKey ? 'opacity-50 grayscale' : 'opacity-100'}`}>
-                <p className="text-sm font-medium text-slate-300 mb-2 ml-1">2. Upload Timeline Data</p>
+                <p className="text-sm font-medium text-slate-300 mb-2 ml-1">3. Upload Timeline Data</p>
                 <FileUpload onFileLoaded={handleFileLoaded} disabled={!googleMapsApiKey} />
             </div>
         </div>
@@ -388,11 +586,11 @@ export default function App() {
               </button>
                {googleMapsApiKey && (
                   <button 
-                      onClick={enrichData}
+                      onClick={() => enrichData('all')}
                       disabled={isEnriching}
-                      className="md:hidden text-xs font-medium text-emerald-500 hover:text-emerald-400 transition-colors px-3 py-1.5 hover:bg-slate-800 rounded-lg disabled:opacity-50"
+                      className="md:hidden text-xs font-medium text-indigo-500 hover:text-indigo-400 transition-colors px-3 py-1.5 hover:bg-slate-800 rounded-lg disabled:opacity-50"
                   >
-                      {isEnriching ? `${enrichmentProgress}%` : <RefreshCw className="w-4 h-4" />}
+                      {isEnriching ? `${enrichmentProgress}%` : <Database className="w-4 h-4" />}
                   </button>
                )}
            </div>
@@ -453,19 +651,18 @@ export default function App() {
             </div>
 
             {/* All-Time Checkbox */}
-            <label className={`flex items-center gap-2 text-xs font-medium whitespace-nowrap px-2 transition-opacity ${placeFilter ? 'opacity-100 cursor-pointer text-white' : 'opacity-40 cursor-not-allowed text-slate-500'}`}>
+            <label className="flex items-center gap-2 text-xs font-medium whitespace-nowrap px-2 cursor-pointer text-white hover:text-indigo-300 transition-colors">
                 <input 
                     type="checkbox" 
                     checked={searchAllTime}
                     onChange={(e) => setSearchAllTime(e.target.checked)}
-                    disabled={!placeFilter}
                     className="rounded border-slate-700 bg-slate-800 text-indigo-500 focus:ring-offset-0 focus:ring-1 focus:ring-indigo-500"
                 />
                 All-Time
             </label>
 
             {/* Date Picker */}
-            <div className={`flex items-center gap-2 bg-slate-800/50 p-1.5 rounded-lg border border-slate-700/50 transition-opacity ${searchAllTime && placeFilter ? 'opacity-30 pointer-events-none' : 'opacity-100'}`}>
+            <div className={`flex items-center gap-2 bg-slate-800/50 p-1.5 rounded-lg border border-slate-700/50 transition-opacity ${searchAllTime ? 'opacity-30 pointer-events-none' : 'opacity-100'}`}>
                 <Calendar className="w-4 h-4 text-slate-400 ml-2" />
                 <input 
                     type="date" 
@@ -515,15 +712,31 @@ export default function App() {
             </button>
             
             {googleMapsApiKey && (
-                 <button 
-                    onClick={enrichData}
-                    disabled={isEnriching}
-                    className="hidden md:flex items-center gap-2 text-xs font-medium text-emerald-500 hover:text-emerald-400 transition-colors px-3 py-1.5 hover:bg-slate-800 rounded-lg disabled:opacity-50"
-                    title="Fetch real names for visited places"
-                 >
-                    <RefreshCw className={`w-4 h-4 ${isEnriching ? 'animate-spin' : ''}`} />
-                    {isEnriching ? `Enriching... ${enrichmentProgress}%` : 'Enrich Data'}
-                 </button>
+                 <div className="hidden md:flex items-center gap-2">
+                    <button 
+                        onClick={() => enrichData('view')}
+                        disabled={isEnriching}
+                        className="flex items-center gap-2 text-xs font-medium text-emerald-500 hover:text-emerald-400 transition-colors px-3 py-1.5 hover:bg-slate-800 rounded-lg disabled:opacity-50"
+                        title="Enrich places in current date range"
+                    >
+                        <RefreshCw className={`w-4 h-4 ${isEnriching && enrichmentMode === 'view' ? 'animate-spin' : ''}`} />
+                        {isEnriching && enrichmentMode === 'view' ? `${enrichmentProgress}%` : 'Enrich View'}
+                    </button>
+                    <button 
+                        onClick={() => enrichData('all')}
+                        disabled={isEnriching}
+                        className="flex items-center gap-2 text-xs font-medium text-indigo-500 hover:text-indigo-400 transition-colors px-3 py-1.5 hover:bg-slate-800 rounded-lg disabled:opacity-50"
+                        title="Enrich ALL places in dataset (may take a while)"
+                    >
+                        <Database className={`w-4 h-4 ${isEnriching && enrichmentMode === 'all' ? 'animate-spin' : ''}`} />
+                        {isEnriching && enrichmentMode === 'all' ? `${enrichedPlacesCount}/${totalPlacesToEnrich}` : 'Enrich All'}
+                    </button>
+                    {storedEnrichmentsCount > 0 && (
+                      <span className="text-xs text-slate-500" title="Stored enrichments">
+                        ({storedEnrichmentsCount} cached)
+                      </span>
+                    )}
+                 </div>
             )}
 
             <button onClick={() => setData(null)} className="hidden md:block text-xs font-medium text-slate-500 hover:text-red-400 transition-colors px-3 py-1.5 hover:bg-slate-800 rounded-lg whitespace-nowrap">
@@ -535,21 +748,75 @@ export default function App() {
       {/* Settings Modal */}
       {showSettings && (
             <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[100] p-4">
-                <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-md w-full shadow-2xl">
+                <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-md w-full shadow-2xl max-h-[90vh] overflow-y-auto">
                     <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-                        <Key className="w-5 h-5 text-indigo-400" /> API Configuration
+                        <Key className="w-5 h-5 text-indigo-400" /> Settings
                     </h3>
-                    <p className="text-slate-400 text-sm mb-4">
-                        Update your Google Maps API Key.
-                    </p>
-                    <input 
-                        type="password" 
-                        value={googleMapsApiKey}
-                        onChange={(e) => setGoogleMapsApiKey(e.target.value)}
-                        placeholder="AIzaSy..."
-                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-white focus:ring-2 focus:ring-indigo-500 outline-none mb-6"
-                    />
-                    <div className="flex justify-end gap-3">
+                    
+                    {/* Google Maps API Key Section */}
+                    <div className="mb-4">
+                        <label className="text-sm font-medium text-slate-300 mb-2 block">Google Maps API Key</label>
+                        <input 
+                            type="password" 
+                            value={googleMapsApiKey}
+                            onChange={(e) => setGoogleMapsApiKey(e.target.value)}
+                            placeholder="AIzaSy..."
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        />
+                        <p className="text-xs text-slate-500 mt-1">For maps and place enrichment</p>
+                    </div>
+                    
+                    {/* Gemini API Key Section */}
+                    <div className="mb-6">
+                        <label className="text-sm font-medium text-slate-300 mb-2 block">Gemini AI API Key</label>
+                        <input 
+                            type="password" 
+                            value={geminiApiKey}
+                            onChange={(e) => handleGeminiApiKeyChange(e.target.value)}
+                            placeholder="AIzaSy..."
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-white focus:ring-2 focus:ring-purple-500 outline-none"
+                        />
+                        <p className="text-xs text-slate-500 mt-1">
+                            For AI chat. Get from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">Google AI Studio</a>
+                        </p>
+                    </div>
+                    
+                    {/* Data Management Section */}
+                    <div className="border-t border-slate-700 pt-4 mb-4">
+                        <h4 className="text-sm font-medium text-slate-300 mb-3 flex items-center gap-2">
+                            <Database className="w-4 h-4 text-indigo-400" />
+                            Enrichment Data ({storedEnrichmentsCount} places cached)
+                        </h4>
+                        <p className="text-xs text-slate-500 mb-3">
+                            Enriched place names are stored locally. Export to backup or share across devices.
+                        </p>
+                        <div className="flex gap-2">
+                            <button
+                                onClick={handleExportEnrichments}
+                                disabled={storedEnrichmentsCount === 0}
+                                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition-colors disabled:opacity-50"
+                            >
+                                <Download className="w-4 h-4" />
+                                Export
+                            </button>
+                            <label className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition-colors cursor-pointer">
+                                <Upload className="w-4 h-4" />
+                                Import
+                                <input 
+                                    type="file" 
+                                    accept=".json"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) handleImportEnrichments(file);
+                                        e.target.value = '';
+                                    }}
+                                />
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div className="flex justify-end gap-3 pt-2">
                         <button 
                             onClick={() => setShowSettings(false)}
                             className="px-4 py-2 text-slate-300 hover:text-white transition-colors"
@@ -582,7 +849,8 @@ export default function App() {
                  <div className="h-full">
                     <ChatInterface 
                         stats={filteredStats} 
-                        events={filteredEvents} 
+                        events={filteredEvents}
+                        allEvents={data.events}
                         onDateChange={handleDateUpdate} 
                         onPlaceFilter={handlePlaceFilterUpdate}
                     />

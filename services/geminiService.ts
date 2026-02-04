@@ -2,8 +2,20 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { DashboardStats, ProcessedEvent } from "../types";
 
+// Store the API key in memory (set from UI)
+let geminiApiKey: string = '';
+
+export const setGeminiApiKey = (key: string) => {
+    geminiApiKey = key;
+};
+
+export const getGeminiApiKey = () => geminiApiKey;
+
 const getAiClient = () => {
-    return new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!geminiApiKey) {
+        throw new Error('Gemini API key not configured. Please add your API key in Settings.');
+    }
+    return new GoogleGenAI({ apiKey: geminiApiKey });
 };
 
 export const generateTimelineInsights = async (stats: DashboardStats) => {
