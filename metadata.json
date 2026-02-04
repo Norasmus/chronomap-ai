@@ -1,0 +1,5 @@
+{
+  "name": "ChronoMap AI Timeline",
+  "description": "Visualize, analyze, and chat with your Google Location History (Timeline) using Gemini AI.",
+  "requestFramePermissions": []
+}
